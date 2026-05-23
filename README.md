@@ -73,9 +73,19 @@ sudo apt update
 sudo apt install apt-transport-github
 ```
 
+### Add Repository Command
+
+You can add a repository using the built-in command:
+
+```bash
+sudo /usr/lib/apt/methods/github add-repo OWNER REPO
+```
+
+This creates `/etc/apt/sources.list.d/REPO.sources` in DEB822 format.
+
 ### DEB822 Format
 
-You can also use the modern DEB822 format (`.sources` files):
+You can also use the modern DEB822 format (`.sources` files) manually:
 
 ```bash
 cat <<EOF | sudo tee /etc/apt/sources.list.d/apt-transport-github.sources

@@ -69,3 +69,28 @@ func TestCleanCmdExists(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "clean", cleanCmd.Use)
 }
+
+func TestAddRepoSubcommand(t *testing.T) {
+	cmd := NewRootCmd("test")
+	cmd.SetArgs([]string{"add-repo", "owner", "repo"})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "root")
+}
+
+func TestAddRepoCmdExists(t *testing.T) {
+	cmd := NewRootCmd("test")
+
+	addRepoCmd, _, err := cmd.Find([]string{"add-repo"})
+	require.NoError(t, err)
+	assert.Equal(t, "add-repo <owner> <repo>", addRepoCmd.Use)
+}
+
+func TestAddRepoRequiresArgs(t *testing.T) {
+	cmd := NewRootCmd("test")
+	cmd.SetArgs([]string{"add-repo"})
+
+	err := cmd.Execute()
+	require.Error(t, err)
+}

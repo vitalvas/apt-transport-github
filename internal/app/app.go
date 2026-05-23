@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/vitalvas/apt-transport-github/internal/addrepo"
 	"github.com/vitalvas/apt-transport-github/internal/cache"
 	"github.com/vitalvas/apt-transport-github/internal/github"
 	"github.com/vitalvas/apt-transport-github/internal/method"
@@ -35,6 +36,7 @@ func NewRootCmdWithIO(version string, stdin io.Reader, stdout io.Writer) *cobra.
 
 	rootCmd.AddCommand(newSetupCmd())
 	rootCmd.AddCommand(newCleanCmd())
+	rootCmd.AddCommand(newAddRepoCmd())
 
 	return rootCmd
 }
@@ -45,6 +47,17 @@ func newSetupCmd() *cobra.Command {
 		Short: "Generate GPG signing key for APT repository metadata",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return setup.Run(cmd.OutOrStdout(), os.Geteuid(), signing.DefaultGPGHome, signing.DefaultPubKey)
+		},
+	}
+}
+
+func newAddRepoCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "add-repo <owner> <repo>",
+		Short: "Add a GitHub repository as an APT source",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return addrepo.Run(cmd.OutOrStdout(), os.Geteuid(), args[0], args[1], addrepo.SourcesDir)
 		},
 	}
 }
