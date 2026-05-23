@@ -16,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/vitalvas/apt-transport-github/internal/cache"
 	"github.com/vitalvas/apt-transport-github/internal/github"
 )
 
@@ -71,6 +72,16 @@ func TestParseURI(t *testing.T) {
 			uri:       "github://owner",
 			expectErr: true,
 		},
+		{
+			name:      "wrong scheme",
+			uri:       "https://github.com/owner/repo",
+			expectErr: true,
+		},
+		{
+			name:      "empty repo",
+			uri:       "github://owner//dists/stable/Release",
+			expectErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -101,6 +112,37 @@ func TestExtractArch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expected, extractArch(tt.path))
+		})
+	}
+}
+
+func TestConstructors(t *testing.T) {
+	assert.NotNil(t, New())
+	assert.NotNil(t, NewWithSigner(&mockSigner{}))
+}
+
+func TestPoolPathRoundTrip(t *testing.T) {
+	path := poolPath("release/v1.0.0", "testpkg_1.0.0_linux_amd64.deb")
+	assert.Equal(t, "pool/release%2Fv1.0.0/testpkg_1.0.0_linux_amd64.deb", path)
+
+	tag, filename, err := parsePoolPath(path)
+	require.NoError(t, err)
+	assert.Equal(t, "release/v1.0.0", tag)
+	assert.Equal(t, "testpkg_1.0.0_linux_amd64.deb", filename)
+}
+
+func TestParsePoolPathInvalid(t *testing.T) {
+	tests := []string{
+		"pool/",
+		"pool/tag",
+		"pool/%zz/file.deb",
+		"pool/tag/%zz",
+	}
+
+	for _, path := range tests {
+		t.Run(path, func(t *testing.T) {
+			_, _, err := parsePoolPath(path)
+			assert.Error(t, err)
 		})
 	}
 }
@@ -573,6 +615,80 @@ func TestMethodHandlePackages(t *testing.T) {
 	assert.NotContains(t, pkgStr, "arm64")
 }
 
+func TestMethodHandlePackagesForeignArchControl(t *testing.T) {
+	server := newTestServer(t)
+	m := newTestMethod(t, server)
+	m.sysArchs = []string{"amd64", "arm64"}
+
+	tmpDir := t.TempDir()
+	filename := filepath.Join(tmpDir, "Packages")
+
+	input := buildAcquireInput("github://owner/testpkg/dists/stable/main/binary-arm64/Packages", filename)
+	var out bytes.Buffer
+
+	m.Run(strings.NewReader(input), &out)
+
+	reader := bufio.NewReader(&out)
+
+	_, err := ReadMessage(reader)
+	require.NoError(t, err)
+
+	_, err = ReadMessage(reader)
+	require.NoError(t, err)
+
+	startMsg, err := ReadMessage(reader)
+	require.NoError(t, err)
+	assert.Equal(t, 200, startMsg.Code)
+
+	msg, err := ReadMessage(reader)
+	require.NoError(t, err)
+	assert.Equal(t, 201, msg.Code)
+
+	content, err := os.ReadFile(filename)
+	require.NoError(t, err)
+
+	pkgStr := string(content)
+	assert.Contains(t, pkgStr, "Architecture: arm64")
+	assert.Contains(t, pkgStr, "Depends: libc6 (>= 2.17), gnupg")
+	assert.Contains(t, pkgStr, "Maintainer: Test <test@example.com>")
+}
+
+func TestGeneratePackagesContentIncludesArchitectureAll(t *testing.T) {
+	m := NewWithOptions(nil, t.TempDir())
+
+	state := &repoState{
+		debInfos: []github.DebInfo{
+			{
+				Name:    "commonpkg",
+				Version: "1.0.0",
+				Arch:    "all",
+				Tag:     "v1.0.0",
+				Asset:   github.Asset{Name: "commonpkg_1.0.0_all.deb", Size: 123},
+				Control: []github.ControlField{
+					{Key: "Package", Value: "commonpkg"},
+					{Key: "Version", Value: "1.0.0"},
+					{Key: "Architecture", Value: "all"},
+					{Key: "Description", Value: "Shared package"},
+				},
+			},
+			{
+				Name:    "nativepkg",
+				Version: "1.0.0",
+				Arch:    "amd64",
+				Tag:     "v1.0.0",
+				Asset:   github.Asset{Name: "nativepkg_1.0.0_amd64.deb", Size: 456},
+			},
+		},
+	}
+
+	pkgStr := string(m.generatePackagesContent(state, "amd64"))
+
+	assert.Contains(t, pkgStr, "Package: commonpkg")
+	assert.Contains(t, pkgStr, "Architecture: all")
+	assert.Contains(t, pkgStr, "pool/v1.0.0/commonpkg_1.0.0_all.deb")
+	assert.Contains(t, pkgStr, "Package: nativepkg")
+}
+
 func TestMethodHandlePackagesGz(t *testing.T) {
 	server := newTestServer(t)
 	m := newTestMethod(t, server)
@@ -672,4 +788,150 @@ func TestMethodHandleReleaseGpg(t *testing.T) {
 	msg, err := ReadMessage(reader)
 	require.NoError(t, err)
 	assert.Equal(t, 400, msg.Code)
+}
+
+func TestMethodHandleUnknownPath(t *testing.T) {
+	server := newTestServer(t)
+	m := newTestMethod(t, server)
+
+	input := buildAcquireInput("github://owner/testpkg/dists/stable/Unknown", filepath.Join(t.TempDir(), "out"))
+	var out bytes.Buffer
+
+	m.Run(strings.NewReader(input), &out)
+
+	reader := bufio.NewReader(&out)
+	_, err := ReadMessage(reader)
+	require.NoError(t, err)
+
+	msg, err := ReadMessage(reader)
+	require.NoError(t, err)
+	assert.Equal(t, 400, msg.Code)
+	assert.Contains(t, msg.Get("Message"), "unknown request path")
+}
+
+func TestMethodHandlePackagesNoArch(t *testing.T) {
+	server := newTestServer(t)
+	m := newTestMethod(t, server)
+
+	input := buildAcquireInput("github://owner/testpkg/dists/stable/main/Packages", filepath.Join(t.TempDir(), "Packages"))
+	var out bytes.Buffer
+
+	m.Run(strings.NewReader(input), &out)
+
+	reader := bufio.NewReader(&out)
+	_, err := ReadMessage(reader)
+	require.NoError(t, err)
+
+	_, err = ReadMessage(reader)
+	require.NoError(t, err)
+
+	msg, err := ReadMessage(reader)
+	require.NoError(t, err)
+	assert.Equal(t, 400, msg.Code)
+	assert.Contains(t, msg.Get("Message"), "cannot determine architecture")
+}
+
+func TestMethodHandlePoolDownload(t *testing.T) {
+	server := newTestServer(t)
+	m := newTestMethod(t, server)
+	m.arch = "mips64el"
+	m.sysArchs = []string{"mips64el"}
+
+	filename := filepath.Join(t.TempDir(), "testpkg.deb")
+	input := buildAcquireInput("github://owner/testpkg/pool/v1.0.0/testpkg_1.0.0_linux_amd64.deb", filename)
+	var out bytes.Buffer
+
+	m.Run(strings.NewReader(input), &out)
+
+	assert.FileExists(t, filename)
+
+	reader := bufio.NewReader(&out)
+	_, err := ReadMessage(reader)
+	require.NoError(t, err)
+
+	_, err = ReadMessage(reader)
+	require.NoError(t, err)
+
+	startMsg, err := ReadMessage(reader)
+	require.NoError(t, err)
+	assert.Equal(t, 200, startMsg.Code)
+
+	doneMsg, err := ReadMessage(reader)
+	require.NoError(t, err)
+	assert.Equal(t, 201, doneMsg.Code)
+	assert.NotEmpty(t, doneMsg.Get("SHA256-Hash"))
+}
+
+func TestMethodHandlePoolAssetNotFound(t *testing.T) {
+	server := newTestServer(t)
+	m := newTestMethod(t, server)
+
+	input := buildAcquireInput("github://owner/testpkg/pool/v9.9.9/missing.deb", filepath.Join(t.TempDir(), "missing.deb"))
+	var out bytes.Buffer
+
+	m.Run(strings.NewReader(input), &out)
+
+	reader := bufio.NewReader(&out)
+	_, err := ReadMessage(reader)
+	require.NoError(t, err)
+
+	_, err = ReadMessage(reader)
+	require.NoError(t, err)
+
+	msg, err := ReadMessage(reader)
+	require.NoError(t, err)
+	assert.Equal(t, 400, msg.Code)
+	assert.Contains(t, msg.Get("Message"), "asset not found")
+}
+
+func TestFetchReleasesFromCache(t *testing.T) {
+	server := newTestServer(t)
+	m := newTestMethod(t, server)
+
+	raw := json.RawMessage(`[{"tag_name":"cached"}]`)
+	require.NoError(t, m.diskCache.PutReleases("owner", "testpkg", 3, raw))
+
+	releases, err := m.fetchReleases("owner", "testpkg", 3)
+	require.NoError(t, err)
+	require.Len(t, releases, 1)
+	assert.Equal(t, "cached", releases[0].TagName)
+}
+
+func TestLoadControlFieldsFromCache(t *testing.T) {
+	m := NewWithOptions(nil, t.TempDir())
+	entry := github.DebInfo{
+		Asset: github.Asset{Name: "pkg_1.0.0_amd64.deb"},
+	}
+
+	require.NoError(t, m.diskCache.PutControl("owner", "repo", "v1.0.0", "pkg_1.0.0_amd64.deb", &cache.Entry{
+		Fields: []cache.Field{{Key: "Package", Value: "pkg"}},
+		SHA256: "abc",
+	}))
+
+	fields, sha := m.loadControlFields(entry, "owner", "repo", "v1.0.0", "pkg_1.0.0_amd64.deb")
+	require.Len(t, fields, 1)
+	assert.Equal(t, "Package", fields[0].Key)
+	assert.Equal(t, "abc", sha)
+}
+
+func TestFileHelpersErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	_, err := hashFile(filepath.Join(tmpDir, "missing"))
+	assert.Error(t, err)
+
+	err = copyFile(filepath.Join(tmpDir, "missing"), filepath.Join(tmpDir, "out"))
+	assert.Error(t, err)
+
+	src := filepath.Join(tmpDir, "src")
+	require.NoError(t, os.WriteFile(src, []byte("data"), 0644))
+	dstParent := filepath.Join(tmpDir, "file")
+	require.NoError(t, os.WriteFile(dstParent, []byte("not a dir"), 0644))
+	err = copyFile(src, filepath.Join(dstParent, "out"))
+	assert.Error(t, err)
+
+	var out bytes.Buffer
+	err = writeFileAndRespond(&out, "github://owner/repo/dists/stable/Release", filepath.Join(dstParent, "out"), []byte("data"))
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "400 URI Failure")
 }

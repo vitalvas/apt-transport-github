@@ -3,6 +3,7 @@ package cache
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,7 +43,7 @@ func controlFilename(debFilename string) string {
 }
 
 func (c *DiskCache) GetControl(owner, repo, tag, filename string) (*Entry, bool) {
-	path := filepath.Join(c.baseDir, owner, repo, tag, controlFilename(filename))
+	path := filepath.Join(c.baseDir, owner, repo, url.PathEscape(tag), controlFilename(filename))
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -58,7 +59,7 @@ func (c *DiskCache) GetControl(owner, repo, tag, filename string) (*Entry, bool)
 }
 
 func (c *DiskCache) PutControl(owner, repo, tag, filename string, entry *Entry) error {
-	dir := filepath.Join(c.baseDir, owner, repo, tag)
+	dir := filepath.Join(c.baseDir, owner, repo, url.PathEscape(tag))
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
@@ -71,8 +72,8 @@ func (c *DiskCache) PutControl(owner, repo, tag, filename string, entry *Entry) 
 	return os.WriteFile(filepath.Join(dir, controlFilename(filename)), data, 0644)
 }
 
-func (c *DiskCache) GetReleases(owner, repo string) (json.RawMessage, bool) {
-	path := filepath.Join(c.baseDir, owner, repo, "releases.json")
+func (c *DiskCache) GetReleases(owner, repo string, limit int) (json.RawMessage, bool) {
+	path := filepath.Join(c.baseDir, owner, repo, fmt.Sprintf("releases_%d.json", limit))
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -91,7 +92,7 @@ func (c *DiskCache) GetReleases(owner, repo string) (json.RawMessage, bool) {
 	return entry.Data, true
 }
 
-func (c *DiskCache) PutReleases(owner, repo string, data json.RawMessage) error {
+func (c *DiskCache) PutReleases(owner, repo string, limit int, data json.RawMessage) error {
 	dir := filepath.Join(c.baseDir, owner, repo)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -107,11 +108,11 @@ func (c *DiskCache) PutReleases(owner, repo string, data json.RawMessage) error 
 		return err
 	}
 
-	return os.WriteFile(filepath.Join(dir, "releases.json"), raw, 0644)
+	return os.WriteFile(filepath.Join(dir, fmt.Sprintf("releases_%d.json", limit)), raw, 0644)
 }
 
 func (c *DiskCache) GetPackage(owner, repo, tag, filename string) (string, bool) {
-	path := filepath.Join(c.baseDir, owner, repo, tag, filename)
+	path := filepath.Join(c.baseDir, owner, repo, url.PathEscape(tag), filename)
 
 	if _, err := os.Stat(path); err != nil {
 		return "", false
@@ -121,7 +122,7 @@ func (c *DiskCache) GetPackage(owner, repo, tag, filename string) (string, bool)
 }
 
 func (c *DiskCache) PutPackage(owner, repo, tag, filename string, data []byte) (string, error) {
-	dir := filepath.Join(c.baseDir, owner, repo, tag)
+	dir := filepath.Join(c.baseDir, owner, repo, url.PathEscape(tag))
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
@@ -147,13 +148,20 @@ func (c *DiskCache) CleanStaleTags(owner, repo string, validTags map[string]bool
 		return err
 	}
 
+	validTagDirs := make(map[string]bool, len(validTags))
+	for tag := range validTags {
+		validTagDirs[url.PathEscape(tag)] = true
+	}
+
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 
-		if !validTags[entry.Name()] {
-			os.RemoveAll(filepath.Join(repoDir, entry.Name()))
+		if !validTagDirs[entry.Name()] {
+			if err := os.RemoveAll(filepath.Join(repoDir, entry.Name())); err != nil {
+				return err
+			}
 		}
 	}
 

@@ -13,6 +13,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type errorReader struct{}
+
+func (r *errorReader) Read(_ []byte) (int, error) {
+	return 0, fmt.Errorf("read failed")
+}
+
+func (r *errorReader) Close() error {
+	return nil
+}
+
 func TestAPIErrorMessage(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -50,6 +60,23 @@ func TestAPIErrorMessage(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestAPIErrorMessageReadError(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusTeapot,
+		Body:       &errorReader{},
+	}
+
+	assert.Equal(t, "HTTP 418", apiErrorMessage(resp))
+}
+
+func TestNewClient(t *testing.T) {
+	client := NewClient()
+
+	assert.Equal(t, http.DefaultClient, client.HTTPClient)
+	assert.Equal(t, "https://api.github.com", client.BaseURL)
+	assert.NotEmpty(t, client.TokensDir)
 }
 
 func TestParseDebFilename(t *testing.T) {
@@ -320,6 +347,31 @@ func TestClientGetReleasesError(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "404")
 	})
+
+	t.Run("invalid url", func(t *testing.T) {
+		client := &Client{
+			HTTPClient: http.DefaultClient,
+			BaseURL:    "http://example.com/\n",
+		}
+
+		_, err := client.GetReleases("owner", "repo", 30)
+		assert.Error(t, err)
+	})
+
+	t.Run("invalid json", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Write([]byte("{"))
+		}))
+		defer server.Close()
+
+		client := &Client{
+			HTTPClient: server.Client(),
+			BaseURL:    server.URL,
+		}
+
+		_, err := client.GetReleases("owner", "repo", 30)
+		assert.Error(t, err)
+	})
 }
 
 func TestClientFetchAssetContent(t *testing.T) {
@@ -343,6 +395,34 @@ func TestClientFetchAssetContent(t *testing.T) {
 	assert.Equal(t, "sha256hash  file.deb\n", content)
 }
 
+func TestClientFetchAssetContentErrors(t *testing.T) {
+	t.Run("status error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer server.Close()
+
+		client := &Client{
+			HTTPClient: server.Client(),
+			BaseURL:    server.URL,
+		}
+
+		_, err := client.FetchAssetContent("owner", "repo", Asset{
+			BrowserDownloadURL: server.URL,
+		})
+		assert.Error(t, err)
+	})
+
+	t.Run("invalid url", func(t *testing.T) {
+		client := &Client{HTTPClient: http.DefaultClient}
+
+		_, err := client.FetchAssetContent("owner", "repo", Asset{
+			BrowserDownloadURL: "http://example.com/\n",
+		})
+		assert.Error(t, err)
+	})
+}
+
 func TestClientFetchAssetBytes(t *testing.T) {
 	expectedContent := []byte("binary content here")
 
@@ -364,6 +444,23 @@ func TestClientFetchAssetBytes(t *testing.T) {
 	got, err := client.FetchAssetBytes("owner", "repo", asset)
 	require.NoError(t, err)
 	assert.Equal(t, expectedContent, got)
+}
+
+func TestClientFetchAssetBytesStatusError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	client := &Client{
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+	}
+
+	_, err := client.FetchAssetBytes("owner", "repo", Asset{
+		BrowserDownloadURL: server.URL,
+	})
+	assert.Error(t, err)
 }
 
 func TestClientDownloadAssetFile(t *testing.T) {
@@ -393,6 +490,45 @@ func TestClientDownloadAssetFile(t *testing.T) {
 	got, err := os.ReadFile(destPath)
 	require.NoError(t, err)
 	assert.Equal(t, expectedContent, got)
+}
+
+func TestClientDownloadAssetFileErrors(t *testing.T) {
+	t.Run("status error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+		}))
+		defer server.Close()
+
+		client := &Client{
+			HTTPClient: server.Client(),
+			BaseURL:    server.URL,
+		}
+
+		_, err := client.DownloadAssetFile("owner", "repo", Asset{
+			BrowserDownloadURL: server.URL,
+		}, filepath.Join(t.TempDir(), "out.deb"))
+		assert.Error(t, err)
+	})
+
+	t.Run("create file error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Write([]byte("content"))
+		}))
+		defer server.Close()
+
+		client := &Client{
+			HTTPClient: server.Client(),
+			BaseURL:    server.URL,
+		}
+
+		baseFile := filepath.Join(t.TempDir(), "file")
+		require.NoError(t, os.WriteFile(baseFile, []byte("not a dir"), 0644))
+
+		_, err := client.DownloadAssetFile("owner", "repo", Asset{
+			BrowserDownloadURL: server.URL,
+		}, filepath.Join(baseFile, "out.deb"))
+		assert.Error(t, err)
+	})
 }
 
 func TestClientFetchAssetWithToken(t *testing.T) {
@@ -655,4 +791,94 @@ func TestVerifyTagSignatureRefNotFound(t *testing.T) {
 
 	_, err := client.VerifyTagSignature("owner", "repo", "v1.0.0")
 	assert.Error(t, err)
+}
+
+func TestVerifyTagSignatureErrors(t *testing.T) {
+	t.Run("invalid url", func(t *testing.T) {
+		client := &Client{
+			HTTPClient: http.DefaultClient,
+			BaseURL:    "http://example.com/\n",
+		}
+
+		_, err := client.VerifyTagSignature("owner", "repo", "v1.0.0")
+		assert.Error(t, err)
+	})
+
+	t.Run("invalid ref json", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Write([]byte("{"))
+		}))
+		defer server.Close()
+
+		client := &Client{
+			HTTPClient: server.Client(),
+			BaseURL:    server.URL,
+		}
+
+		_, err := client.VerifyTagSignature("owner", "repo", "v1.0.0")
+		assert.Error(t, err)
+	})
+
+	t.Run("unexpected ref type", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			ref := GitRef{}
+			ref.Object.Type = "blob"
+			json.NewEncoder(w).Encode(ref)
+		}))
+		defer server.Close()
+
+		client := &Client{
+			HTTPClient: server.Client(),
+			BaseURL:    server.URL,
+		}
+
+		_, err := client.VerifyTagSignature("owner", "repo", "v1.0.0")
+		assert.Error(t, err)
+	})
+
+	t.Run("tag object status error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/repos/owner/repo/git/ref/tags/v1.0.0" {
+				ref := GitRef{}
+				ref.Object.Type = "tag"
+				ref.Object.SHA = "abc123"
+				json.NewEncoder(w).Encode(ref)
+				return
+			}
+
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer server.Close()
+
+		client := &Client{
+			HTTPClient: server.Client(),
+			BaseURL:    server.URL,
+		}
+
+		_, err := client.VerifyTagSignature("owner", "repo", "v1.0.0")
+		assert.Error(t, err)
+	})
+
+	t.Run("commit object invalid json", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/repos/owner/repo/git/ref/tags/v1.0.0" {
+				ref := GitRef{}
+				ref.Object.Type = "commit"
+				ref.Object.SHA = "abc123"
+				json.NewEncoder(w).Encode(ref)
+				return
+			}
+
+			w.Write([]byte("{"))
+		}))
+		defer server.Close()
+
+		client := &Client{
+			HTTPClient: server.Client(),
+			BaseURL:    server.URL,
+		}
+
+		_, err := client.VerifyTagSignature("owner", "repo", "v1.0.0")
+		assert.Error(t, err)
+	})
 }

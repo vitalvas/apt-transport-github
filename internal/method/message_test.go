@@ -3,12 +3,19 @@ package method
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type failingWriter struct{}
+
+func (w *failingWriter) Write(_ []byte) (int, error) {
+	return 0, fmt.Errorf("write failed")
+}
 
 func TestMessageWrite(t *testing.T) {
 	msg := &Message{Code: 100, Text: "Capabilities"}
@@ -22,6 +29,13 @@ func TestMessageWrite(t *testing.T) {
 
 	expected := "100 Capabilities\nVersion: 1.2\nSingle-Instance: true\n\n"
 	assert.Equal(t, expected, buf.String())
+}
+
+func TestMessageWriteError(t *testing.T) {
+	msg := &Message{Code: 100, Text: "Capabilities"}
+
+	err := msg.Write(&failingWriter{})
+	assert.Error(t, err)
 }
 
 func TestReadMessage(t *testing.T) {
@@ -71,6 +85,17 @@ func TestReadMessage(t *testing.T) {
 			name:      "no text",
 			input:     "600\n\n",
 			expectErr: true,
+		},
+		{
+			name:  "eof after header",
+			input: "600 URI Acquire\nURI: github://owner/repo",
+			expectedMsg: &Message{
+				Code: 600,
+				Text: "URI Acquire",
+				Headers: []Header{
+					{Key: "URI", Value: "github://owner/repo"},
+				},
+			},
 		},
 	}
 

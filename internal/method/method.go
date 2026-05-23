@@ -145,6 +145,10 @@ type parsedURI struct {
 }
 
 func parseURI(uri string) (*parsedURI, error) {
+	if !strings.HasPrefix(uri, "github://") {
+		return nil, fmt.Errorf("invalid URI scheme: %s", uri)
+	}
+
 	trimmed := strings.TrimPrefix(uri, "github://")
 
 	queryPart := ""
@@ -154,7 +158,7 @@ func parseURI(uri string) (*parsedURI, error) {
 	}
 
 	parts := strings.SplitN(trimmed, "/", 3)
-	if len(parts) < 2 {
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
 		return nil, fmt.Errorf("invalid URI: %s", uri)
 	}
 
@@ -265,10 +269,10 @@ func (m *Method) loadRepo(parsed *parsedURI, out io.Writer) (*repoState, error) 
 		allDebInfo := release.CollectDebInfo(checksums)
 
 		for i, info := range allDebInfo {
-			uriPath := fmt.Sprintf("pool/%s/%s", release.TagName, info.Asset.Name)
+			uriPath := poolPath(release.TagName, info.Asset.Name)
 			assets[uriPath] = info.Asset
 
-			if info.Arch != m.arch && info.Arch != "all" {
+			if !m.shouldLoadControl(info.Arch) {
 				continue
 			}
 
@@ -294,7 +298,9 @@ func (m *Method) loadRepo(parsed *parsedURI, out io.Writer) (*repoState, error) 
 		validTags[release.TagName] = true
 	}
 
-	m.diskCache.CleanStaleTags(parsed.Owner, parsed.Repo, validTags)
+	if err := m.diskCache.CleanStaleTags(parsed.Owner, parsed.Repo, validTags); err != nil {
+		m.logger.Printf("warning: failed to clean stale cache tags for %s/%s: %s", parsed.Owner, parsed.Repo, err)
+	}
 
 	state := &repoState{
 		debInfos: allDebInfos,
@@ -308,7 +314,7 @@ func (m *Method) loadRepo(parsed *parsedURI, out io.Writer) (*repoState, error) 
 }
 
 func (m *Method) fetchReleases(owner, repo string, limit int) ([]github.Release, error) {
-	if data, ok := m.diskCache.GetReleases(owner, repo); ok {
+	if data, ok := m.diskCache.GetReleases(owner, repo, limit); ok {
 		var releases []github.Release
 		if err := json.Unmarshal(data, &releases); err == nil {
 			return releases, nil
@@ -321,10 +327,26 @@ func (m *Method) fetchReleases(owner, repo string, limit int) ([]github.Release,
 	}
 
 	if data, err := json.Marshal(releases); err == nil {
-		m.diskCache.PutReleases(owner, repo, data)
+		if err := m.diskCache.PutReleases(owner, repo, limit, data); err != nil {
+			m.logger.Printf("warning: failed to cache releases for %s/%s: %s", owner, repo, err)
+		}
 	}
 
 	return releases, nil
+}
+
+func (m *Method) shouldLoadControl(arch string) bool {
+	if arch == "all" || arch == m.arch {
+		return true
+	}
+
+	for _, sysArch := range m.sysArchs {
+		if arch == sysArch {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (m *Method) loadControlFields(info github.DebInfo, owner, repo, tag, filename string) ([]cache.Field, string) {
@@ -338,7 +360,9 @@ func (m *Method) loadControlFields(info github.DebInfo, owner, repo, tag, filena
 		return nil, ""
 	}
 
-	m.diskCache.PutPackage(owner, repo, tag, filename, debData)
+	if _, err := m.diskCache.PutPackage(owner, repo, tag, filename, debData); err != nil {
+		m.logger.Printf("warning: failed to cache package %s/%s %s: %s", owner, repo, filename, err)
+	}
 
 	ctrl, err := deb.ParseControl(debData)
 	if err != nil {
@@ -354,10 +378,12 @@ func (m *Method) loadControlFields(info github.DebInfo, owner, repo, tag, filena
 		fields = append(fields, cache.Field{Key: f.Key, Value: f.Value})
 	}
 
-	m.diskCache.PutControl(owner, repo, tag, filename, &cache.Entry{
+	if err := m.diskCache.PutControl(owner, repo, tag, filename, &cache.Entry{
 		Fields: fields,
 		SHA256: sha256Hex,
-	})
+	}); err != nil {
+		m.logger.Printf("warning: failed to cache control for %s/%s %s: %s", owner, repo, filename, err)
+	}
 
 	return fields, sha256Hex
 }
@@ -401,7 +427,9 @@ func (m *Method) generateReleaseContent(parsed *parsedURI, state *repoState) []b
 	archSet := make(map[string]struct{})
 
 	for _, info := range state.debInfos {
-		archSet[info.Arch] = struct{}{}
+		if info.Arch != "all" {
+			archSet[info.Arch] = struct{}{}
+		}
 	}
 
 	for _, arch := range m.sysArchs {
@@ -503,11 +531,10 @@ func (m *Method) handlePool(parsed *parsedURI, uri, filename string, out io.Writ
 		return sendFailure(out, uri, "asset not found")
 	}
 
-	// pool/{tag}/{filename} -> extract tag and asset filename
-	poolSuffix := strings.TrimPrefix(parsed.Path, "pool/")
-	parts := strings.SplitN(poolSuffix, "/", 2)
-	tag := parts[0]
-	assetFilename := parts[1]
+	tag, assetFilename, err := parsePoolPath(parsed.Path)
+	if err != nil {
+		return sendFailure(out, uri, err.Error())
+	}
 
 	status := &Message{Code: 200, Text: "URI Start"}
 	status.Set("URI", uri)
@@ -569,7 +596,7 @@ func (m *Method) generatePackagesContent(state *repoState, arch string) []byte {
 	first := true
 
 	for _, info := range state.debInfos {
-		if info.Arch != arch {
+		if info.Arch != arch && info.Arch != "all" {
 			continue
 		}
 
@@ -579,7 +606,7 @@ func (m *Method) generatePackagesContent(state *repoState, arch string) []byte {
 
 		first = false
 
-		poolPath := fmt.Sprintf("pool/%s/%s", info.Tag, info.Asset.Name)
+		poolFilename := poolPath(info.Tag, info.Asset.Name)
 
 		if len(info.Control) > 0 {
 			for _, f := range info.Control {
@@ -593,7 +620,7 @@ func (m *Method) generatePackagesContent(state *repoState, arch string) []byte {
 			fmt.Fprintf(&buf, "Architecture: %s\n", info.Arch)
 		}
 
-		fmt.Fprintf(&buf, "Filename: %s\n", poolPath)
+		fmt.Fprintf(&buf, "Filename: %s\n", poolFilename)
 		fmt.Fprintf(&buf, "Size: %d\n", info.Asset.Size)
 
 		if info.SHA256 != "" {
@@ -619,6 +646,30 @@ func extractArch(path string) string {
 	}
 
 	return rest
+}
+
+func poolPath(tag, filename string) string {
+	return fmt.Sprintf("pool/%s/%s", url.PathEscape(tag), url.PathEscape(filename))
+}
+
+func parsePoolPath(path string) (tag, filename string, err error) {
+	poolSuffix := strings.TrimPrefix(path, "pool/")
+	parts := strings.SplitN(poolSuffix, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("invalid pool path")
+	}
+
+	tag, err = url.PathUnescape(parts[0])
+	if err != nil {
+		return "", "", fmt.Errorf("invalid pool tag: %w", err)
+	}
+
+	filename, err = url.PathUnescape(parts[1])
+	if err != nil {
+		return "", "", fmt.Errorf("invalid pool filename: %w", err)
+	}
+
+	return tag, filename, nil
 }
 
 type fileHashes struct {

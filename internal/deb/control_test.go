@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -142,6 +143,39 @@ func TestParseControlNoControlTar(t *testing.T) {
 	assert.Contains(t, err.Error(), "control archive not found")
 }
 
+func TestExtractControlFileErrors(t *testing.T) {
+	t.Run("invalid gzip", func(t *testing.T) {
+		_, err := extractControlFile([]byte("not gzip"))
+		assert.Error(t, err)
+	})
+
+	t.Run("no control file", func(t *testing.T) {
+		data := buildControlTarGz(t, "")
+		var tarBuf bytes.Buffer
+		tw := tar.NewWriter(&tarBuf)
+		require.NoError(t, tw.WriteHeader(&tar.Header{
+			Name: "./postinst",
+			Size: int64(len("script")),
+			Mode: 0755,
+		}))
+		_, err := tw.Write([]byte("script"))
+		require.NoError(t, err)
+		require.NoError(t, tw.Close())
+
+		var gzBuf bytes.Buffer
+		gz := gzip.NewWriter(&gzBuf)
+		_, err = gz.Write(tarBuf.Bytes())
+		require.NoError(t, err)
+		require.NoError(t, gz.Close())
+
+		_, err = extractControlFile(gzBuf.Bytes())
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "control file not found")
+
+		_ = data
+	})
+}
+
 func TestControlGet(t *testing.T) {
 	ctrl := &Control{
 		Fields: []Field{
@@ -171,6 +205,21 @@ Description: Short desc
 	assert.Equal(t, "1.0.0", ctrl.Get("Version"))
 	assert.Equal(t, "libc6, gnupg", ctrl.Get("Depends"))
 	assert.Contains(t, ctrl.Get("Description"), "Short desc\n Long description line 1\n Long description line 2")
+}
+
+func TestParseControlFieldsScannerError(t *testing.T) {
+	data := []byte(fmt.Sprintf("Package: %s", strings.Repeat("a", 70*1024)))
+
+	_, err := parseControlFields(data)
+	assert.Error(t, err)
+}
+
+func TestExtractControlTarShortHeader(t *testing.T) {
+	data := []byte("!<arch>\nshort")
+
+	_, err := extractControlTar(data)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to read ar header")
 }
 
 func TestExtractControlTarInvalidSignature(t *testing.T) {
