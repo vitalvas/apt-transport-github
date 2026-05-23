@@ -91,7 +91,7 @@ func (m *Method) Run(in io.Reader, out io.Writer) error {
 	}
 }
 
-const defaultVersions = 3
+const defaultVersions = 1
 
 var goArchToDebian = map[string]string{
 	"amd64": "amd64",

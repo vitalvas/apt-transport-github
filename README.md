@@ -89,7 +89,7 @@ EOF
 
 ### Version History
 
-By default, the last 3 releases are available for version pinning. To change the limit, add the `versions` query parameter:
+By default, the latest release is available. To include older releases for version pinning, add the `versions` query parameter:
 
 ```
 deb [signed-by=/etc/apt/keyrings/apt-transport-github.gpg] github://OWNER/REPO?versions=20 stable main
