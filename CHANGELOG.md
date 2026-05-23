@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.12.0](https://github.com/vitalvas/apt-transport-github/compare/v0.11.3...v0.12.0) (2026-05-23)
+
+
+### Features
+
+* add repository setup command ([0eb0338](https://github.com/vitalvas/apt-transport-github/commit/0eb03384a805d91348c66348f582ae959060976b))
+
+
+### Bug Fixes
+
+* change default versions from 3 to 1 ([e169b2a](https://github.com/vitalvas/apt-transport-github/commit/e169b2a1f0cfc4da98e4bba3269b52fa4d3a435a))
+* handle apt transport edge cases ([c7fcda2](https://github.com/vitalvas/apt-transport-github/commit/c7fcda22fa793fb5cebc08647d0a8154cd73b2e4))
+
 ## [0.11.3](https://github.com/vitalvas/apt-transport-github/compare/v0.11.2...v0.11.3) (2026-05-08)
 
 
